@@ -104,6 +104,29 @@ def estimate_model(L):
     return T, p0 / p0.sum()
 
 
+def load_scores(W, demo):
+    """
+    Средняя оценка студента за задания курса (studentAssessment + assessments),
+    выровненная по строкам W. NaN - у студента нет оценок (например, выбыл).
+    """
+    if demo:
+        rng = np.random.default_rng(1)
+        m = W.values.mean(1)
+        sc = np.clip(35 + 9 * np.log1p(m) + rng.normal(0, 12, len(m)), 0, 100)
+        sc[rng.random(len(m)) < 0.15] = np.nan
+        return sc
+    sa = pd.read_csv(os.path.join(DATA_DIR, "studentAssessment.csv"),
+                     usecols=["id_assessment", "id_student", "score"])
+    a = pd.read_csv(os.path.join(DATA_DIR, "assessments.csv"),
+                    usecols=["code_module", "code_presentation", "id_assessment"])
+    sa["score"] = pd.to_numeric(sa["score"], errors="coerce")
+    m = sa.merge(a, on="id_assessment")
+    g = m.groupby(["code_module", "code_presentation", "id_student"])["score"].mean()
+    sc = g.reindex(W.index).values.astype(float)
+    log(f"Оценки найдены для {np.isfinite(sc).mean():.0%} записей студент-курс")
+    return sc
+
+
 # =============================================================== MDP
 def build_mdp(T, effect=BASE_EFFECT, fatigue=BASE_FATIGUE):
     """
@@ -299,14 +322,14 @@ def top_k(score, share):
     return f
 
 
-def defend_mad(F, share):
+def defend_mad(F, share, ctx=None):
     """Робастная z-оценка (медиана/MAD), отклонения «вверх»."""
     med = np.median(F, 0)
     mad = np.median(np.abs(F - med), 0) * 1.4826 + 1e-9
     return top_k(np.clip((F - med) / mad, 0, None).sum(1), share)
 
 
-def defend_mahalanobis(F, share):
+def defend_mahalanobis(F, share, ctx=None):
     """Расстояние Махаланобиса до центра распределения."""
     mu = F.mean(0)
     C = np.cov(F.T) + 1e-6 * np.eye(F.shape[1])
@@ -314,7 +337,7 @@ def defend_mahalanobis(F, share):
     return top_k(np.einsum("ij,jk,ik->i", D, np.linalg.inv(C), D), share)
 
 
-def defend_knn(F, share, k=10, ref=1500, seed=0):
+def defend_knn(F, share, ctx=None, k=10, ref=1500, seed=0):
     """Расстояние до k-го ближайшего соседа из опорной выборки (аналог LOF)."""
     rng = np.random.default_rng(seed)
     Z = (F - F.mean(0)) / (F.std(0) + 1e-9)
@@ -326,7 +349,43 @@ def defend_knn(F, share, k=10, ref=1500, seed=0):
     return top_k(score, share)
 
 
-DEFENSES = {"MAD": defend_mad, "Махаланобис": defend_mahalanobis, "kNN": defend_knn}
+def consistency_score(F, ctx):
+    """
+    Согласованность активности и успеваемости. По всем студентам с оценками
+    строится регрессия: оценка ~ log(средние клики). Подозрителен тот, чья
+    оценка заметно НИЖЕ ожидаемой при его активности: много кликов без знаний.
+    Студенты без оценок получают нейтральный балл 0.
+    """
+    S, act = ctx["scores"], F[:, 0]                 # F[:,0] = log(1+mean clicks)
+    ok = np.isfinite(S)
+    A = np.c_[np.ones(ok.sum()), act[ok]]
+    coef, *_ = np.linalg.lstsq(A, S[ok], rcond=None)
+    resid = np.zeros(len(S))
+    resid[ok] = S[ok] - A @ coef
+    mad = np.median(np.abs(resid[ok] - np.median(resid[ok]))) * 1.4826 + 1e-9
+    z = np.clip(-resid / mad, 0, None)              # только «ниже ожидаемого»
+    # учитываем, насколько активность выше типичной (фармеры активны)
+    za = np.clip((act - np.median(act)) / (np.median(np.abs(act - np.median(act))) * 1.4826 + 1e-9), 0, None)
+    return z * (1 + za)
+
+
+def defend_consistency(F, share, ctx):
+    return top_k(consistency_score(F, ctx), share)
+
+
+def defend_hybrid(F, share, ctx):
+    """Гибрид: MAD-аномальность поведения + несогласованность с оценками."""
+    med = np.median(F, 0)
+    mad = np.median(np.abs(F - med), 0) * 1.4826 + 1e-9
+    s1 = np.clip((F - med) / mad, 0, None).sum(1)
+    s2 = consistency_score(F, ctx)
+    r1 = s1.argsort().argsort() / len(s1)           # ранги, чтобы шкалы были сопоставимы
+    r2 = s2.argsort().argsort() / len(s2)
+    return top_k(np.maximum(r1, r2), share)
+
+
+DEFENSES = {"MAD": defend_mad, "Махаланобис": defend_mahalanobis, "kNN": defend_knn,
+            "Согласованность": defend_consistency, "Гибрид": defend_hybrid}
 ATTACKS = {"наивные боты": naive_bots, "умные фармеры": smart_farmers}
 
 
@@ -352,6 +411,8 @@ def main():
 
     W = load_weekly(args.demo)
     X = W.values
+    SCORES = load_scores(W, args.demo)
+    valid_scores = SCORES[np.isfinite(SCORES)]
     L = to_levels(X)
     n_students = len(L)
 
@@ -488,6 +549,9 @@ def main():
                 n_att = int(len(X) * sh)
                 Xp = np.vstack([X, att(X, n_att, rng)])
                 lab = np.r_[np.zeros(len(X), bool), np.ones(n_att, bool)]
+                # фармер набирает активность, но не знания: его оценка - как у
+                # случайного студента курса, независимо от числа кликов
+                Sp = np.r_[SCORES, rng.choice(valid_scores, size=n_att)]
                 Tp, p0p = estimate_model(to_levels(Xp))
                 dist0 = np.linalg.norm(Tp - T_full)
                 # завышение прогноза вовлечённости: модель на отравленных данных
@@ -498,7 +562,7 @@ def main():
                               (v_pois / v_true - 1) * 100, np.nan, np.nan))
                 F = features(Xp)
                 for dn, dfun in DEFENSES.items():
-                    fl = dfun(F, sh)
+                    fl = dfun(F, sh, {"scores": Sp})
                     prec = (fl & lab).sum() / max(fl.sum(), 1)
                     rec = (fl & lab).sum() / lab.sum()
                     Tc, p0c = estimate_model(to_levels(Xp[~fl]))
@@ -516,6 +580,14 @@ def main():
     say("  distortion - искажение матрицы переходов ||T_атака - T||,")
     say("  forecast_bias_% - завышение прогноза вовлечённости моделью")
     say(agg4.round(3).to_string())
+    for att_name in ATTACKS:
+        sub = agg4.xs(att_name, level="attack")
+        for sh in shares:
+            base = sub.loc[(sh, "без защиты"), "distortion"]
+            best = sub.loc[sh].drop("без защиты")["distortion"].idxmin()
+            bv = sub.loc[(sh, best), "distortion"]
+            say(f"  {att_name}, {int(sh*100)}%: лучшая защита - {best} "
+                f"(искажение {base:.3f} -> {bv:.3f}, в {base / max(bv, 1e-9):.1f} раза)")
 
     # ------------------------------------------------------------- E5
     log("E5: проверка по курсам...")
@@ -581,7 +653,7 @@ def main():
     ax[1].legend()
     plt.tight_layout(); plt.savefig(os.path.join(OUT_DIR, "fig3_reliability.png"), dpi=200); plt.close()
 
-    fig, ax = plt.subplots(1, 2, figsize=(12, 4.5), sharey=True)
+    fig, ax = plt.subplots(1, 2, figsize=(14, 4.8))
     for i, att_name in enumerate(ATTACKS):
         sub = agg4.xs(att_name, level="attack")["distortion"].unstack()
         sub = sub[["без защиты"] + list(DEFENSES)]
