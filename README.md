@@ -82,6 +82,7 @@ python oulad_experiments.py --fast   # ускоренный режим с мен
 | `revision_checks.py` | R1: бандит vs Q-learning (парный тест, объём обучения); R2: перенос стратегии (студенты 50/50, 2013 → 2014); R3/R4: априорные пороги MAD и согласованности, каскад | `results_revision/summary_revision.txt`, `R1_bandit_vs_q.csv`, `R2_split.csv`, `R3_R4_thresholds.csv` |
 | `r3c_reference.py` | Пороги и опорная статистика (медиана/MAD, регрессия) по чистым данным 2013 г., атака и оценка на 2014 г. — **вариант, приведённый в статье** | `summary_R3c.txt`, `R3c_reference.csv` |
 | `r3b_calibrated.py` | Промежуточный вариант: пороги по 2013 г., но центр и масштаб MAD по самой очищаемой выборке (в статье не используется) | `summary_R3b.txt`, `R3b_calibrated.csv` |
+| `r5_ablation.py` | R5: абляционный анализ критерия согласованности (без веса активности, двусторонний остаток, без успеваемости, MAD); Precision, Recall, F1, искажение | `summary_R5.txt`, `R5_ablation.csv` |
 
 Запуск из корня репозитория (данные OULAD в папке `data/`):
 
