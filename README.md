@@ -83,10 +83,13 @@ python oulad_experiments.py --fast   # ускоренный режим с мен
 | `r3c_reference.py` | Пороги и опорная статистика (медиана/MAD, регрессия) по чистым данным 2013 г., атака и оценка на 2014 г. — **вариант, приведённый в статье** | `summary_R3c.txt`, `R3c_reference.csv` |
 | `r3b_calibrated.py` | Промежуточный вариант: пороги по 2013 г., но центр и масштаб MAD по самой очищаемой выборке (в статье не используется) | `summary_R3b.txt`, `R3b_calibrated.csv` |
 
-Запуск (из корня репозитория, данные OULAD в `data/`):
-    python revision_checks.py
-    python r3b_calibrated.py
-    python r3c_reference.py
+Запуск из корня репозитория (данные OULAD в папке `data/`):
+
+```bash
+python revision_checks.py
+python r3b_calibrated.py
+python r3c_reference.py
+```
 
 ## Авторы
 
