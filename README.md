@@ -90,6 +90,7 @@ python oulad_experiments.py --fast   # ускоренный режим с мен
 python revision_checks.py
 python r3b_calibrated.py
 python r3c_reference.py
+python r5_ablation.py
 ```
 
 ## Авторы
